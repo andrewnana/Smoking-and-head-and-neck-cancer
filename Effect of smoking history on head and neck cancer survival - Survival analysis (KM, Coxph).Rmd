@@ -1,0 +1,482 @@
+---
+title: "Effect of smoking history on head and neck cancer survival"
+author: "Andre Nana"
+institute: CUNY SPH Biostatistics 2
+output:
+  pdf_document:
+    toc: true
+---
+
+## 1. Introduction and rationale
+
+Head and neck cancers represent a major public health problem worldwide. Alcohol consumption, smoking, and infection by the human papillomavirus(HPV)) are the main causes of these diseases (Leemans et al., 2011). Treatment relies on different strategies, including chemotherapy, radiation therapy, and surgery, based on specific criteria such as the tumor stage and grade, the patient's age, and response to initial treatment, among other factors. Using data collected from the medical records of 215 patients treated definitively for HNSCC at the University of Texas MD Anderson Cancer Center, we propose to evaluate the impact of smoking history on head and neck cancer patient’s survival.
+
+## 2. Data exploration and manipulation
+
+### a. Loading relevant libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE, echo = TRUE, message = FALSE)
+
+# loading packages
+library(survival)
+library(dplyr)
+library(table1)
+library(survminer)
+library(readxl)
+library(dagitty)
+library(stargazer)
+library(pheatmap)
+library(gtsummary)
+library(mice)
+```
+
+### b. Loading data and selecting variables of interest
+
+```{r}
+hnscc_raw <- read_excel("HNSCC-MDA-Data_update_20240514.xlsx") 
+hnscc0 <- hnscc_raw  %>% select(Sex, Age, Diag, Grade, Stage, `Survival  (months)`,
+                                `Alive or Dead`, `Smoking History`, `Current Smoker`, 
+                                `BMI start treat (kg/m2)`)
+```
+
+### c. Assessing missing data and recoding variables of interest
+
+```{r}
+na_count <- hnscc0 %>% 
+  summarize_all(~sum(is.na(.)))
+print(t(na_count))
+```
+
+We do not have any missing values for the selected variables
+
+```{r}
+hnscc1 <- hnscc0 %>%
+  mutate(
+    
+    # Outcome of interest
+    
+      # for the demographic table
+    Outcome = `Alive or Dead`, 
+    
+      # for the survival analysis
+    Cens = case_when( 
+     `Alive or Dead` == "Alive" ~ 0,
+     `Alive or Dead` == "Dead" ~ 1), 
+    
+    # Time to event data
+     Time = `Survival  (months)`, 
+    
+     # Main exposure
+    `Smoking history` = factor(case_when(
+      `Smoking History`== 0 ~ "Never",
+      `Smoking History`== 1 ~ "< 10 pack",
+      `Smoking History`== 2 ~ ">= 10 pack"),
+      levels = c("Never", "< 10 pack", ">= 10 pack")),
+    
+    
+    # Other predictors
+       # transforming age into categories
+    `Age group` = factor(cut(Age, breaks = c(20, 50, 60, 70, 95))), 
+    
+    `Current smoker` = factor(case_when(
+      `Current Smoker` == 0 ~ "No",
+      `Current Smoker` == 1 ~ "Yes")),
+   
+    `Stage` = factor(case_when(
+      Stage %in% c("IVA", "IVB") ~ "IV",
+      Stage %in% c("I", "II", "III") ~ Stage),
+      levels = c("I", "II", "III", "IV") ),
+    
+    BMI = factor(case_when(
+      `BMI start treat (kg/m2)` < 18.5 ~ "Underweight",
+      `BMI start treat (kg/m2)` >= 18.5 & `BMI start treat (kg/m2)`< 24.9 ~ "Normal weight",
+      `BMI start treat (kg/m2)` >= 24.9 & `BMI start treat (kg/m2)`< 30 ~ "Overweight",
+      `BMI start treat (kg/m2)` >= 30 ~ "Obese"),
+      levels = c("Underweight", "Normal weight","Overweight","Obese" )),
+    
+    Diagnostic = factor(case_when(
+      Diag %in% c("CA alveolar ridge", "CA buccal mucosa", "CA oral tongue", 
+              "CA soft palate", "CA retromolar trigone", "CA BOT",  
+              "recurrence CA retromolar trigone") ~ "Oral",
+      Diag %in% c("CA oropharynx", "CA posterior pharyngeal wall", "CA pharyngeal", 
+              "CA hypopharynx", "CA pyriform sinus","CA glossopharyngeal sulcus",
+              "CA tonsil") ~ "Pharyngeal",
+      Diag %in% c("CA larynx", "CA supraglottic") ~ "Laryngeal",
+      Diag %in% c("CA maxillary sinus", "NPC") ~ "Sinonasal/pharyngeal",
+      Diag == "CUP" ~ "Unknown Primary",
+      TRUE ~ "Other"  )),
+    
+    Grade = as.factor(Grade)
+    )
+
+ 
+```
+
+### d. Assessing multicollinearity among predictors
+
+The heatmap shows that smoking history is correlated with current smoking, with a Pearson correlation coefficient of 0.6. Therefore we will include only smoking history in our prediction models. All remaining pairwise correlation coefficients were less than or equal to 0.25.
+
+```{r, fig.height=6, fig.align='center', fig.pos="H", out.extra='keepaspectratio'}
+# We renamed these variables to make the heatmap readable in the knitted pdf file
+hnscc1$ag = hnscc1$`Age group` 
+hnscc1$st = hnscc1$`Stage`
+hnscc1$hist = hnscc1$`Smoking history` 
+hnscc1$sm = hnscc1$`Current smoker`
+hnscc1$dia = hnscc1$`Diagnostic` 
+
+mm <- model.matrix(~ ., data = hnscc1[, c("ag", "st", "hist", "sm", "dia", "BMI")])
+
+# Create the heatmap without dendrograms
+pheatmap(
+  cor(mm[, -1]), 
+  color = colorRampPalette(c("#ebf5fb", "#aed6f1", "#3498db"))(100),
+  display_numbers = TRUE,
+  cluster_rows = FALSE,  
+  cluster_cols = FALSE  
+)
+
+```
+
+## 3. Demographic table
+
+```{r, fig.align='center', fig.pos="H", out.extra='keepaspectratio'}
+library(table1)
+table1(~ Sex + Age + `Age group` + Outcome + `Current smoker` + Diagnostic + 
+         Grade + Stage + BMI | `Smoking history`, data = hnscc1,
+       caption = "Characteristics of the study population, stratified by 
+       current smoking status",
+       footnote = "Data source: Imaging and clinical data archive for 
+       head and neck squamous cell carcinoma patients treated with radiotherapy")
+```
+
+-   There is an over representation of male participants, with 84.7%(n=182) 
+-   The majority of participants were in the (50,60] years age range, with 81 participants or 37.7%.
+-   The majority - 67.4%- of participants reporting not being current smokers (n=145)
+-   The majority of participants could be classified as overweight (36.7%) or obese (34.0%)
+-   Most cancers could be anatomically classified as oral cancers with 42.8% (n=92)
+
+## 4. Kaplan-Meier plots
+
+```{r, fig.height=6, fig.align='center', fig.pos="H", out.extra='keepaspectratio'}
+# Kaplan meier estimates
+kmsmoker <- survminer::surv_fit(Surv(Time, Cens) ~ as.factor(`Current smoker`), data = hnscc1)
+kmsmoking_history <- survminer::surv_fit(Surv(Time, Cens) ~ as.factor(`Smoking history`), data = hnscc1)
+kmAge <- survminer::surv_fit(Surv(Time, Cens) ~ as.factor(`Age group`), data = hnscc1)
+kmStage <- survminer::surv_fit(Surv(Time, Cens) ~ as.factor(`Stage`), data = hnscc1)
+kmSex <- survminer::surv_fit(Surv(Time, Cens) ~ Sex, data = hnscc1)
+
+# survival plot with follow-up table
+survminer::ggsurvplot(kmsmoker,
+           xlab = "Time (Months)",
+           ylab = "Survival Probability",
+           pval = TRUE,
+           title = "Survival by current smoking status")
+
+survminer::ggsurvplot(kmsmoking_history,
+           xlab = "Time (Months)",
+           ylab = "Survival Probability",
+           pval = TRUE,
+           title = "Survival by history of smoking")
+
+survminer::ggsurvplot(kmAge,
+           xlab = "Time (Months)",
+           ylab = "Survival Probability",
+           pval = TRUE,
+           title = "Survival by age group")
+
+survminer::ggsurvplot(kmStage,
+           xlab = "Time (Months)",
+           ylab = "Survival Probability",
+           pval = TRUE,
+           title = "Survival by cancer stage")
+
+survminer::ggsurvplot(kmSex,
+           xlab = "Time (Monthss)",
+           ylab = "Survival Probability",
+           pval = TRUE,
+           title = "Survival by sex")
+
+```
+
+
+
+
+```{r}
+# Here we create an other object (kmsmoker2 for instance), because <- NULL                            suppresses the call output and simplify the reading, but kmsmoker cannot be                            used in the log-minus log plot in later sections
+
+kmsmoker2 = kmsmoker
+kmsmoking_history2 = kmsmoking_history
+kmStage2 = kmStage
+kmAge2 = kmAge
+kmSex2 = kmSex
+
+
+kmsmoker2$call <- NULL 
+kmsmoking_history2$call <- NULL
+kmStage2$call <- NULL
+kmAge2$call <- NULL
+kmSex2$call <- NULL
+
+kmsmoker2
+kmsmoking_history2
+kmStage2
+kmAge2
+kmSex2
+```
+
+-   We can see from the figure that the survival curves look different for current smoker (blue) and non current smoker (orange). However, the log rank test p-value of 0.08 is not significant. Based on these data, were can conclude that there was no difference in survival based on current smoking status. Nonetheless, the median survival time was 105.9 months for non-current smoker, versus 86.8 months for current smokers.
+
+-   For smoking history, the curves of the different comparison groups are crossing and sometimes overlaping. The log-rank test p-value is also not significant (0.53), suggesting that survival did not differ by smoking history.
+
+-   Survival did not differ by sex either, as the survival curves for Males and Females are crossing and the log-rank test p-value was not significant (0.82)
+
+-   For age, there are crossing, and overlapping between the curves of the different age groups, and the log-rank test p-value was significant also not significant,(0.08), suggesting that survival did not differ by age group. However, the results could have been different, had we retained a different segmentation of age.
+
+-   With regard to stage, there is also a lot of overlap between the different stages. Nonetheless, the log-rank p-value is 0.0037, suggesting that survival differed by the stage of the cancer. Surprisingly, in this study, the lower stages had the poorest survival with the lowest median survival of 30.5 months. The last patient in the stage 1 group died before the 46th month. All the lower stage cancer patients had a history of smoking more than 10 packs but were no current smokers.Two of them had poorly differentiated tumors, 1 had a moderately to poor differentiation and the remaining patient had moderately differented tumor. There is a relationship between tumor differentiation and survival, with poor differentiation associated with poor outcome.
+
+```{r}
+quantile(kmStage, probs = 1)
+hnscc1 |> 
+  filter(Stage == "I") |> 
+  select(`Current smoker`, `Smoking history`, `Grade`, `BMI`, `Age group`, `Diagnostic`) |> 
+  summary()
+```
+
+## 5. Directed Acyclic Graph (DAG)
+
+```{r}
+DAG <- dagitty(
+'dag {
+bb="0,0,1,1"
+"Smoking history" [exposure,pos="0.184,0.451"]
+"overall survival" [outcome,pos="0.827,0.439"]
+"Unknown HPV status" [pos="0.5, 0.3"]
+Sex [pos="0.7,0.13"]
+BMI [pos="0.5,0.561"]
+Grade [pos="0.5, 0.897"]
+Diagnostic [pos="0.5, 0.63"]
+Age [pos="0.35,0.1"]
+Stage [pos="0.5,0.729"]
+"Smoking history" -> "overall survival"
+"Smoking history" -> BMI
+"Smoking history" -> Grade
+"Smoking history" -> Stage
+"Smoking history" -> Diagnostic
+Age -> "Smoking history"
+Age -> "overall survival"
+Age -> "Unknown HPV status"
+"Unknown HPV status" -> "overall survival"
+BMI -> "overall survival"
+Grade -> "overall survival"
+Diagnostic -> "overall survival"
+Sex -> "Smoking history"
+Sex -> "overall survival"
+Stage -> "overall survival"
+}'
+)
+
+plot(DAG)
+
+```
+
+In this model, our exposure of interest is smoking history, and our outcome is overall survival. In this DAG, we hypothesis that Age, Sex and the unmeasured HPV status are confounders. Therefore, we will adjust for Age and Sex. BMI, Diagnostic, Stage and Grade are mediators in the causal pathway between history of smoking and survival. Therefore, we will not adjust for these variables, since we want to estimate the total effect of smoking history on survival.
+
+## 6. Cox proportional hazard model
+
+### a. Univariate regression
+
+for each of your predictor variables to estimate their crude associations with survival.
+
+```{r, fig.align='center', fig.pos="H", out.extra='keepaspectratio'}
+fitcoxph_smoker <- coxph(Surv(Time, Cens) ~ `Smoking history`, hnscc1) 
+fitcoxph_Age <- coxph(Surv(Time, Cens) ~ `Age group`, hnscc1) 
+fitcoxph_Sex <- coxph(Surv(Time, Cens) ~ Sex, hnscc1) 
+
+smoker <- tbl_regression(fitcoxph_smoker, exponentiate = TRUE)
+Age <- tbl_regression(fitcoxph_Age, exponentiate = TRUE)
+Sex <- tbl_regression(fitcoxph_Sex, exponentiate = TRUE)
+
+smoker
+Age
+Sex
+```
+
+In this univariate analysis:
+
+-   Participants a smoking history of less than 10 pack a year, had 1.07 (95% CI = 0.46, 2.48) times the hazard of dying from head and neck cancer, compared to those who never smoked.
+
+-   Participants with a smoking history of at least 10 pack a year, had 1.31 (95% CI = 0.80, 2.15) times the hazard of dying from head and neck cancer, compared to those who never smoked.
+
+-   Participants aged (50,60] had 1.06 (95% CI = 0.55, 2.05) times the hazard of dying from head and neck cancer, compared to participants aged (20,50].
+
+-   Participants aged (60,70] had 1.87(95% CI = 0.99, 3.54) times the hazard of dying from head and neck cancer, compared to participants aged (20,50].
+
+-   Participants aged (70,95] had 1.86 (95% CI = 0.78, 4.45) times the hazard of dying from head and neck cancer, compared to participants aged (20,50].
+
+-   Male participants had 1.08 (95% CI = 0.57, 2.04) times the hazard of dying from head and neck cancer, compared to female participants
+
+***In these univariate models, survival from head and neck cancer did not differ by smoking history, age group or sex***
+
+### b. Multivariate regression
+
+Based on our theory displayed in the DAG, we will estimate the total effect of smoking history on survival, controlled for sex and age categories, which we believe, are confounders.
+
+```{r, fig.align='center', fig.pos="H", out.extra='keepaspectratio'}
+fitcoxph <- coxph(Surv(Time, Cens) ~ `Smoking history`  + Sex + `Age group`, hnscc1) 
+
+results <- tbl_regression(fitcoxph, exponentiate = TRUE)
+results 
+```
+
+In this multivariate analysis:
+
+-   Participants with a smoking history of less than 10 pack a year, had 1.04 (95% CI = 0.45, 2.43) times the hazard of dying from head and neck cancer, compared to those who never smoked, adjusted for sex and age group
+
+-   Participants had a smoking history of at least 10 pack a year, had 1.19 (95% CI = 0.72, 1.98) times the hazard of dying from head and neck cancer, compared to those who never smoked, adjusted for sex and age group
+
+-   Participants aged (50,60] had 1.04 (95% CI = 0.53, 2.01) times the hazard of dying from head and neck cancer, compared to participants aged (20,50], adjusted for smoking history and sex.
+
+-   Participants aged (60,70] had 1.78(95% CI = 0.93, 3.41) times the hazard of dying from head and neck cancer, compared to participants aged (20,50], adjusted for smoking history and sex.
+
+-   Participants aged (70,95] had 1.85(95% CI = 0.77, 4.42) times the hazard of dying from head and neck cancer, compared to participants aged (20,50], adjusted for smoking history and sex.
+
+-   Male participants had 1.06 (95% CI = 0.56, 2.02) times the hazard of dying from head and neck cancer, compared to female participants, adjusted for smoking history and age
+
+***The results of this multivariate analysis are very similar to the univariate models and suggest that survival from head and neck cancer did not differ by smoking history, age group or sex***
+
+### c. Diagnostics of proportional hazards assumptions
+
+#### Log minus log plot
+
+```{r, fig.align='center', fig.pos="H", out.extra='keepaspectratio'}
+ggsurvplot(kmsmoking_history, fun = "cloglog", xlab = "Time (in months) using log",
+     ylab = "log-log survival", main = "log-log curves by smoking history")
+ggsurvplot(kmAge, fun = "cloglog", xlab = "Time (in months) using log",
+     ylab = "log-log survival", main = "log-log curves by age group")
+ggsurvplot(kmSex, fun = "cloglog", xlab = "Time (in months) using log",
+     ylab = "log-log survival", main = "log-log curves by sex")
+```
+
+It seems like the proportional hazards assumption holds for smoking history, to a certain extend. For age groups, the assumptions may hold between (20,50](orange curve) and (60,70](cyan blue curve), but there are overlapping between the (50,60] group and the others. The proportional hazards assumption does not hold for sex.
+
+#### Schoenfeld test for proportional hazards
+
+```{r, fig.align='center', fig.pos="H", out.extra='keepaspectratio'}
+fitzph <- cox.zph(fitcoxph)
+fitzph
+plot(fitzph)
+```
+
+The Schoenfeld residuals test shows non-significant p-values for all individual covariates and the global test. The residuals plot looks unsystematic for smoking history and age group, but there is a pattern for the sex variable. We conclude that the proportional hazards assumption does not hold for sex, and decide to proceed with a stratified cox proportional hazard model, with sex as the stratified variable
+
+### d. Stratification
+
+```{r, results='asis'}
+fitcoxph_strat <- coxph(Surv(Time, Cens) ~ `Smoking history`  + strata(Sex) + 
+                          `Age group`, hnscc1) 
+
+results_strat <- tbl_regression(fitcoxph_strat, exponentiate = TRUE)
+results_strat
+```
+
+***The stratified model yields similar results and survival did not differ by smoking history or age group.***
+
+### e. Interpretation and discussion
+
+**Results**
+
+-   We wanted to assess the effect of smoking history on survival from head and neck cancer, adjusted for age and sex that we identified as confounders, based on our DAG.
+
+-   In our final stratified model, participant who had smoking history of less than 10 pack a year, had 1.02 (95%CI = 0.44, 2.37) times the hazard of dying from head and neck cancer, compared to those who never smoked, adjusted for sex and age group, and participant who had smoking history of at least 10 pack a year, had 1.21 (95%CI = 0.73, 1.99) times the hazard of dying from head and neck cancer, compared to those who never smoked, adjusted for sex and age group. With regard to age groups, all estimates remained non-significant.
+
+-   These results suggest that head and neck cancer survival was not associated wit history of smoking or age
+
+**Discussion**
+
+-   From the Kaplan Mieir plots, we found that the survival did not differ by current smoking status or history of smoking, and that lower cancer stages had poorer survival. From our cox proportional hazard model, we found also that survival did not differ by smoking status both at the univariate, multivariate analysis and the stratified cox proportional hazards model. This is against our expectations, as it is well documented that smoking, whether current or not, has a negative impact on cancer survival, including head and neck cancer. It is also obvious that the higher the stage, the more severe the prognosis.
+
+    **Potential reasons for these curious findings:**
+
+-   The source of the data and the nature of the study design. This is a retrospective cohort study, as data were collected from existing medical records from October 2003 to August 2013. Therefore, we may assume that the data were not expressly designed for a survival analysis.
+
+-   Survival was defined as the time from diagnosis to the date of death due to ***any cause***. We are not even sure if patients died from head and neck cancer or something else. Therefore we have ***competing risks*** in this case, since patients could have died from head and neck cancer OR any other disease. Subsequently, we cannot confirm that the non-informative censoring assumption is not violated. A competing risk analysis may be more suitable for this data.
+
+-   The assessment of smoking history is subject to information bias, with possible misclassification of exposure (differential or non-differential).
+
+-   We did not measure the effect of major confounders such as HPV infection and race.
+
+-   We did not take treatment into consideration in this analysis (it would require a thorough assessment and classification, given the complexity of treatment methods and regimen)
+
+-   It is worth noting that our study included only 215 patients, which may be insufficient to achieve the 80% power needed to detect a meaningful effect size. For example, the unexpected finding that patients with lower grades had poorer survival could be related to their specific characteristics (such as poorly differentiated tumors or a history of heavy smoking). However, this result might also stem from the fact that there were only 4 patients in that subgroup.
+
+## 7. Conclusion
+
+In this analysis, we aimed to evaluate the impact of smoking history on survival in head and neck cancer, while accounting for selected confounders - sex and age - identified through our theoretical framework as depicted in the DAG. Our findings showed no significant predictors of survival in the univariate, multivariate, or stratified models, and survival probabilities did not differ across any of the selected predictors. Interestingly, we observed an unexpected result: patients with lower-stage disease had the lowest median survival. These findings contradict our initial hypothesis that smoking history would negatively affect survival. Potential explanations for these results are discussed in the interpretation and discussion sections. To address this research question more effectively, a prospective cohort study with sufficient statistical power would be more appropriate.
+
+## **Machine learning section**
+
+Instead of random forest, we will apply Multivariate Imputation by Chained Equations using the package mice.
+
+```{r}
+hpv<- read.csv("HNSCC-Clinical-Data.csv")
+hpv1 <- hpv |> mutate(
+  Status = factor(case_when(
+    `HPV.Status` == "N" ~ "Negative",
+    `HPV.Status` == "P" ~ "Positive",
+    `HPV.Status` == "Unknown" ~ "Unknown",
+    TRUE ~ NA_character_),
+    levels = c("Negative", "Positive", "Unknown")),
+  
+  Cens1 = case_when(
+    `Vital.status` == "Alive" ~ 0,
+    `Vital.status` == "Dead" ~ 1),
+  
+  Time = `Overall.survival_duration`)
+```
+
+```{r, message=FALSE, results='hide'}
+# Setting the number of imputation to 100, default predictor matrix and methods
+
+hpv_imp <- mice(hpv1, m = 100, seed = 12345)
+
+hpv_fit <- with(hpv_imp,  coxph(Surv(Time, Cens1) ~ Status))
+```
+
+```{r}
+# Pool the results from the multiple imputations
+pooled <- pool(hpv_fit)
+
+# Get the summary of the pooled model
+summary_pooled <- summary(pooled)
+
+# Calculate the odds ratios and confidence intervals
+hazards_ratios <- round(exp(summary_pooled$estimate), 2)
+conf_int_lower <- round(exp(summary_pooled$estimate - 1.96 * summary_pooled$std.error), 2)
+conf_int_upper <- round(exp(summary_pooled$estimate + 1.96 * summary_pooled$std.error), 2)
+
+# Combine the results into a data frame
+results <- data.frame(
+  Predictor = summary_pooled[, 1],
+  hazards_ratios = hazards_ratios, 
+  CI_Lower = conf_int_lower,
+  CI_Upper = conf_int_upper
+)
+
+# Display the results
+results
+```
+
+**Remark:**
+
+-   Patients with a positive HPV status, had 0.37 (95% CI = 0.22, 0.64) times the hazard of dying from head and neck cancer, compared to those with negative HPV status.
+-   Patients with an Unknown HPV status, had 0.39 (95% CI = 0.23 0.68) times the hazard of dying from head and neck cancer, compared to those with negative HPV status.
+
+This is consistent with the literature, since a positive HPV infection is associated with a better survival (Li et al. 2018)
+
+**References**
+
+-   Leemans, C. R., Braakhuis, B. J., & Brakenhoff, R. H. (2011). The molecular biology of head and neck cancer. Nature Reviews Cancer, 11(1), 9–22.
+
+-   Li, H., Torabi, S. J., Yarbrough, W. G., Mehra, S., Osborn, H. A., & Judson, B. (2018). Association of human papillomavirus status at head and neck carcinoma subsites with overall survival. JAMA Otolaryngology–Head & Neck Surgery, 144(6), 519–525. <https://doi.org/10.1001/jamaoto.2018.0395>
